@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from readability import Document
 from sqlalchemy.orm import Session
 
+from app.core.config import settings as env_config
 from app.core.imap import send_client_id
 from app.core.logging import get_logger
 from app.crud.entries import create_entry, get_entry_by_message_id
@@ -149,6 +150,43 @@ def _extract_and_clean_html(raw_html_content: str) -> dict[str, str]:
     return {"title": title, "body": cleaned_body}
 
 
+def _extract_sender(msg: Message) -> str:
+    """Extract the sender address of an email.
+
+    Alias and forwarding services (addy.io, SimpleLogin, ...) rewrite the 'From'
+    header into an encoded address such as
+    '<alias>+contact=example.com@my-domain.tld' and expose the real sender in a
+    dedicated header. Such rewritten addresses regularly exceed the 64 octet
+    limit the RFC 5321 sets on the local part, which makes them fail validation.
+
+    When LETTERFEED_SENDER_HEADER names that header, it takes precedence over
+    'From'. Falls back to 'From' whenever the header is absent or unusable.
+    """
+    if env_config.sender_header:
+        raw = msg.get(env_config.sender_header)
+        if raw:
+            decoded = str(make_header(decode_header(raw)))
+            address = email.utils.parseaddr(decoded)[1]
+            # parseaddr is lenient and returns the first token of any garbage it
+            # is handed, so require something that at least looks like an address.
+            if "@" in address:
+                return address
+            logger.warning(
+                f"Header '{env_config.sender_header}' holds no usable address "
+                f"({raw!r}), falling back to 'From'."
+            )
+    return email.utils.parseaddr(msg["From"])[1]
+
+
+def _clean_display_name(name: str) -> str:
+    """Strip the alias suffix some forwarding services append to the display name.
+
+    addy.io renders the display name as "Real Name 'local at example.com'".
+    Only that exact shape is removed, any other name is returned untouched.
+    """
+    return re.sub(r"\s*'[^']*\s+at\s+[^']*'\s*$", "", name).strip() or name
+
+
 def _auto_add_newsletter(
     db: Session,
     sender: str,
@@ -159,7 +197,8 @@ def _auto_add_newsletter(
     logger.info(f"Auto-adding new newsletter for sender: {sender}")
     # Decode the 'From' header to handle non-ASCII characters in the sender's name
     from_header = str(make_header(decode_header(msg.get("From", ""))))
-    newsletter_name = email.utils.parseaddr(from_header)[0] or sender
+    display_name = email.utils.parseaddr(from_header)[0]
+    newsletter_name = _clean_display_name(display_name) if display_name else sender
     new_newsletter_schema = NewsletterCreate(
         name=newsletter_name,
         sender_emails=[sender],
@@ -181,7 +220,7 @@ def _process_single_email(
         return
 
     msg = email.message_from_bytes(data[0][1])
-    sender = email.utils.parseaddr(msg["From"])[1]
+    sender = _extract_sender(msg)
     message_id = msg.get("Message-ID")
 
     if not message_id:

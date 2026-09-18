@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     mark_as_read: bool = False
     email_check_interval: int = 15
     auto_add_new_senders: bool = False
+    sender_header: str = Field(
+        "",
+        validation_alias=AliasChoices("SENDER_HEADER", "LETTERFEED_SENDER_HEADER"),
+    )
     auth_username: str | None = None
     auth_password: str | None = None
     secret_key: str | None = Field(

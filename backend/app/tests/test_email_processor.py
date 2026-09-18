@@ -1,5 +1,6 @@
 import imaplib
 from email.message import Message
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from sqlalchemy.orm import Session
@@ -9,7 +10,12 @@ from app.crud.settings import create_or_update_settings
 from app.models.newsletters import Newsletter
 from app.schemas.newsletters import NewsletterCreate
 from app.schemas.settings import Settings, SettingsCreate
-from app.services.email_processor import _process_single_email, process_emails
+from app.services.email_processor import (
+    _clean_display_name,
+    _extract_sender,
+    _process_single_email,
+    process_emails,
+)
 
 
 def _setup_test_email_processing(
@@ -278,3 +284,54 @@ def test_process_single_email_with_null_bytes_in_body(db_session: Session):
         # The body should be the original (but decoded) body, since extraction failed
         # Note: _get_email_body will decode the payload.
         assert "Hello\x00 World" in entry_create_arg.body
+
+
+def _sender_header_config(header: str):
+    """Stand in for the frozen env config, which cannot be patched in place."""
+    return patch(
+        "app.services.email_processor.env_config",
+        SimpleNamespace(sender_header=header),
+    )
+
+
+def test_clean_display_name_strips_alias_suffix():
+    """The alias suffix appended by forwarding services is removed."""
+    assert (
+        _clean_display_name("Example News 'contact at example.com'") == "Example News"
+    )
+    # Names that do not carry the suffix are left untouched.
+    assert _clean_display_name("Example Daily") == "Example Daily"
+    # A name made only of the suffix falls back to the original string.
+    assert _clean_display_name("'info at example.com'") == "'info at example.com'"
+
+
+def test_extract_sender_prefers_configured_header():
+    """The configured header wins over a rewritten 'From'."""
+    msg = Message()
+    msg["From"] = (
+        "\"Example News 'contact at example.com'\" "
+        "<a1b2c3d4-0000-4000-8000-000000000000+contact=example.com@alias.example>"
+    )
+    msg["X-AnonAddy-Original-Sender"] = "contact@example.com"
+
+    with _sender_header_config("X-AnonAddy-Original-Sender"):
+        assert _extract_sender(msg) == "contact@example.com"
+
+
+def test_extract_sender_falls_back_to_from_header():
+    """'From' is used when the header is unset, absent or unusable."""
+    msg = Message()
+    msg["From"] = "Example Daily <news@example.org>"
+
+    # No header configured: current behaviour is preserved.
+    with _sender_header_config(""):
+        assert _extract_sender(msg) == "news@example.org"
+
+    # Configured but absent from the message.
+    with _sender_header_config("X-AnonAddy-Original-Sender"):
+        assert _extract_sender(msg) == "news@example.org"
+
+    # Present but holding no usable address.
+    msg["X-AnonAddy-Original-Sender"] = "not an address"
+    with _sender_header_config("X-AnonAddy-Original-Sender"):
+        assert _extract_sender(msg) == "news@example.org"
