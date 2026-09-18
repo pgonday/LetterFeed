@@ -61,8 +61,14 @@ def _connect_to_imap(
 
 
 def _fetch_unread_email_ids(mail: imaplib.IMAP4_SSL) -> list[str]:
-    """Fetch IDs of unread emails."""
-    status, messages = mail.search(None, "(UNSEEN)")
+    """Fetch UIDs of unread emails.
+
+    UIDs are used rather than sequence numbers because the mailbox is modified
+    while the returned list is being iterated over. Sequence numbers are
+    positional and shift as soon as a message leaves the mailbox, whereas a UID
+    keeps pointing at the same message for the whole session.
+    """
+    status, messages = mail.uid("SEARCH", "(UNSEEN)")
     if status != "OK":
         logger.error(f"Failed to search for unseen emails, status: {status}")
         return []
@@ -207,16 +213,16 @@ def _auto_add_newsletter(
 
 
 def _process_single_email(
-    num: str,
+    uid: str,
     mail: imaplib.IMAP4_SSL,
     db: Session,
     sender_map: dict[str, Newsletter],
     settings: Settings,
 ) -> None:
-    """Process a single email message."""
-    status, data = mail.fetch(num, "(BODY.PEEK[])")
-    if status != "OK":
-        logger.warning(f"Failed to fetch email with id={num}")
+    """Process a single email message, addressed by UID."""
+    status, data = mail.uid("FETCH", uid, "(BODY.PEEK[])")
+    if status != "OK" or not data or data[0] is None:
+        logger.warning(f"Failed to fetch email with uid={uid}")
         return
 
     msg = email.message_from_bytes(data[0][1])
@@ -275,14 +281,23 @@ def _process_single_email(
     )
 
     if settings.mark_as_read:
-        logger.debug(f"Marking email with id={num} as read")
-        mail.store(num, "+FLAGS", "\\Seen")
+        logger.debug(f"Marking email with uid={uid} as read")
+        mail.uid("STORE", uid, "+FLAGS", "\\Seen")
 
     move_folder = newsletter.move_to_folder or settings.move_to_folder
     if move_folder:
-        logger.debug(f"Moving email with id={num} to {move_folder}")
-        mail.copy(num, move_folder)
-        mail.store(num, "+FLAGS", "\\Deleted")
+        logger.debug(f"Moving email with uid={uid} to {move_folder}")
+        status, _ = mail.uid("COPY", uid, move_folder)
+        if status != "OK":
+            # Without this guard a failed copy still flags the message as
+            # deleted, and the expunge that follows destroys it with no copy
+            # left anywhere.
+            logger.error(
+                f"Failed to copy email with uid={uid} to '{move_folder}', "
+                "leaving it in place."
+            )
+            return
+        mail.uid("STORE", uid, "+FLAGS", "\\Deleted")
 
 
 def process_emails(db: Session) -> None:
@@ -327,8 +342,8 @@ def process_emails(db: Session) -> None:
             logger.info(
                 f"Found {len(email_ids)} unseen emails in folder '{search_folder}'."
             )
-            for num in email_ids:
-                _process_single_email(num, mail, db, sender_map, settings)
+            for uid in email_ids:
+                _process_single_email(uid, mail, db, sender_map, settings)
 
             # Expunge logic needs to be carefully considered.
             # If any newsletter in this folder group has a move_to_folder, we expunge.

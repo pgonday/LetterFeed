@@ -9,6 +9,7 @@ from app.crud.settings import create_or_update_settings
 from app.schemas.newsletters import NewsletterCreate
 from app.schemas.settings import SettingsCreate
 from app.services.email_processor import process_emails
+from app.tests.conftest import set_uid_responses
 
 
 @patch("app.core.imap.imaplib.IMAP4_SSL")
@@ -80,11 +81,10 @@ def test_process_emails(mock_imap, db_session: Session):
     mock_imap.return_value = mock_mail
     mock_mail.login.return_value = ("OK", [b"Login successful"])
     mock_mail.select.return_value = ("OK", [b"1"])
-    mock_mail.search.return_value = ("OK", [b"1"])
 
     # Mock email content
     mock_msg_bytes = b"From: newsletter@example.com\nSubject: Test Subject\nMessage-ID: <test@test.com>\n\n<p>Test Body</p>"
-    mock_mail.fetch.return_value = ("OK", [(None, mock_msg_bytes)])
+    set_uid_responses(mock_mail, mock_msg_bytes)
 
     process_emails(db_session)
 
@@ -94,11 +94,11 @@ def test_process_emails(mock_imap, db_session: Session):
         "ID", '("name" "LetterFeed" "version" "0.4.0" "vendor" "LetterFeed")'
     )
     mock_mail.select.assert_called_once_with("INBOX")
-    mock_mail.search.assert_called_once_with(None, "(UNSEEN)")
-    mock_mail.fetch.assert_called_once_with(b"1", "(BODY.PEEK[])")
-    mock_mail.store.assert_any_call(b"1", "+FLAGS", "\\Seen")
-    mock_mail.copy.assert_called_once_with(b"1", "Processed")
-    mock_mail.store.assert_any_call(b"1", "+FLAGS", "\\Deleted")
+    mock_mail.uid.assert_any_call("SEARCH", "(UNSEEN)")
+    mock_mail.uid.assert_any_call("FETCH", b"1", "(BODY.PEEK[])")
+    mock_mail.uid.assert_any_call("STORE", b"1", "+FLAGS", "\\Seen")
+    mock_mail.uid.assert_any_call("COPY", b"1", "Processed")
+    mock_mail.uid.assert_any_call("STORE", b"1", "+FLAGS", "\\Deleted")
     mock_mail.expunge.assert_called_once()
     mock_mail.logout.assert_called_once()
 
@@ -175,9 +175,8 @@ def test_process_emails_auto_add_sender(mock_imap, db_session: Session):
     mock_imap.return_value = mock_mail
     mock_mail.login.return_value = ("OK", [b"Login successful"])
     mock_mail.select.return_value = ("OK", [b"1"])
-    mock_mail.search.return_value = ("OK", [b"1"])
     mock_msg_bytes = b"From: New Sender <new@example.com>\nSubject: New Email\nMessage-ID: <new@new.com>\n\nHello"
-    mock_mail.fetch.return_value = ("OK", [(None, mock_msg_bytes)])
+    set_uid_responses(mock_mail, mock_msg_bytes)
 
     process_emails(db_session)
 
@@ -222,14 +221,14 @@ def test_process_emails_no_move_or_read(mock_imap, db_session: Session):
     mock_imap.return_value = mock_mail
     mock_mail.login.return_value = ("OK", [b"Login successful"])
     mock_mail.select.return_value = ("OK", [b"1"])
-    mock_mail.search.return_value = ("OK", [b"1"])
     mock_msg_bytes = b"From: newsletter@example.com\nSubject: Test Subject\nMessage-ID: <test@test.com>\n\nTest Body"
-    mock_mail.fetch.return_value = ("OK", [(None, mock_msg_bytes)])
+    set_uid_responses(mock_mail, mock_msg_bytes)
 
     process_emails(db_session)
 
-    mock_mail.store.assert_not_called()
-    mock_mail.copy.assert_not_called()
+    uid_commands = [call.args[0] for call in mock_mail.uid.call_args_list]
+    assert "STORE" not in uid_commands
+    assert "COPY" not in uid_commands
 
 
 @patch("app.services.email_processor.imaplib.IMAP4_SSL")
@@ -264,10 +263,9 @@ def test_process_emails_avoids_duplicates(mock_imap, db_session: Session):
     mock_imap.return_value = mock_mail
     mock_mail.login.return_value = ("OK", [b"Login successful"])
     mock_mail.select.return_value = ("OK", [b"1"])
-    mock_mail.search.return_value = ("OK", [b"1"])
     # This email has the same Message-ID as the one we just created
     mock_msg_bytes = b"From: newsletter@example.com\nSubject: Test Subject\nMessage-ID: <existing@message.com>\n\nTest Body"
-    mock_mail.fetch.return_value = ("OK", [(None, mock_msg_bytes)])
+    set_uid_responses(mock_mail, mock_msg_bytes)
 
     process_emails(db_session)
 

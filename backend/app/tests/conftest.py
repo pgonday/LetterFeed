@@ -64,3 +64,22 @@ def cleanup_test_db(request):
             os.remove(db_file)
 
     request.addfinalizer(remove_test_db)
+
+
+def set_uid_responses(mock_mail, message_bytes, uid=b"1"):
+    """Route mock_mail.uid() by IMAP command, the way imaplib dispatches UID.
+
+    SEARCH answers with a single UID, FETCH answers with the given message, and
+    every other command (STORE, COPY) simply succeeds.
+    """
+
+    def _uid(command, *args):
+        command = command.upper()
+        if command == "SEARCH":
+            return ("OK", [uid])
+        if command == "FETCH":
+            return ("OK", [(b"1 (RFC822)", message_bytes)])
+        return ("OK", [b""])
+
+    mock_mail.uid.side_effect = _uid
+    return mock_mail

@@ -16,6 +16,7 @@ from app.services.email_processor import (
     _process_single_email,
     process_emails,
 )
+from app.tests.conftest import set_uid_responses
 
 
 def _setup_test_email_processing(
@@ -33,7 +34,7 @@ def _setup_test_email_processing(
     msg["Subject"] = "Test Email"
     msg["Message-ID"] = "<test-message-id>"
     msg.set_payload("<html><body><p>Original Body</p></body></html>", "utf-8")
-    mock_mail.fetch.return_value = ("OK", [(b"1 (RFC822)", msg.as_bytes())])
+    set_uid_responses(mock_mail, msg.as_bytes())
 
     return mock_mail, newsletter, settings
 
@@ -61,8 +62,8 @@ def test_process_single_email_with_newsletter_move_folder(db_session: Session):
     _process_single_email("1", mock_mail, db_session, sender_map, settings)
 
     # 3. ASSERT
-    mock_mail.copy.assert_called_once_with("1", "NewsletterArchive")
-    mock_mail.store.assert_any_call("1", "+FLAGS", "\\Deleted")
+    mock_mail.uid.assert_any_call("COPY", "1", "NewsletterArchive")
+    mock_mail.uid.assert_any_call("STORE", "1", "+FLAGS", "\\Deleted")
 
 
 def test_process_single_email_with_global_move_folder(db_session: Session):
@@ -86,8 +87,8 @@ def test_process_single_email_with_global_move_folder(db_session: Session):
     _process_single_email("1", mock_mail, db_session, sender_map, settings)
 
     # 3. ASSERT
-    mock_mail.copy.assert_called_once_with("1", "GlobalArchive")
-    mock_mail.store.assert_any_call("1", "+FLAGS", "\\Deleted")
+    mock_mail.uid.assert_any_call("COPY", "1", "GlobalArchive")
+    mock_mail.uid.assert_any_call("STORE", "1", "+FLAGS", "\\Deleted")
 
 
 @patch("app.services.email_processor._connect_to_imap")
@@ -215,7 +216,7 @@ def test_process_single_email_with_encoded_from_header(db_session: Session):
     msg["Subject"] = "Test Email"
     msg["Message-ID"] = "<test-message-id-encoded-from>"
     msg.set_payload("<html><body><p>Body</p></body></html>", "utf-8")
-    mock_mail.fetch.return_value = ("OK", [(b"1 (RFC822)", msg.as_bytes())])
+    set_uid_responses(mock_mail, msg.as_bytes())
 
     sender_map = {}  # empty, to trigger auto-add
 
@@ -258,7 +259,7 @@ def test_process_single_email_with_null_bytes_in_body(db_session: Session):
     # The body contains NULL bytes that would cause readability-lxml to crash
     body_with_nulls = "<html><body><p>Hello\x00 World</p></body></html>"
     msg.set_payload(body_with_nulls, "utf-8")
-    mock_mail.fetch.return_value = ("OK", [(b"1 (RFC822)", msg.as_bytes())])
+    set_uid_responses(mock_mail, msg.as_bytes())
 
     sender_map = {newsletter.senders[0].email: newsletter}
 
